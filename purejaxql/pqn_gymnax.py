@@ -166,10 +166,12 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         train_state = create_agent(rng)
 
+        ema_alpha = 2 / (config["NUM_EPISODES_FOR_EMA_AVERAGE"] + 1)
+
         # TRAINING LOOP
         def _update_step(runner_state, unused):
 
-            train_state, expl_state, test_metrics, rng = runner_state
+            train_state, expl_state, test_metrics, rng, ema_metrics = runner_state
 
             # SAMPLE PHASE
             def _step_env(carry, _):
@@ -330,6 +332,40 @@ def make_train(config):
             }
             metrics.update({k: v.mean() for k, v in infos.items()})
 
+            def compute_ema(infos, m):
+                is_done = infos["returned_episode"]
+                episode_returns = infos["returned_episode_returns"]
+                episode_lengths = infos["returned_episode_lengths"]
+                num_dones = is_done.sum()
+
+                returns_ema, lengths_ema = m
+
+                mean_episode_return = jnp.sum(is_done * episode_returns) / jnp.maximum(
+                    num_dones, 1
+                )
+                effective_alpha = 1 - (1 - ema_alpha) ** num_dones
+                updated_returns_ema = jnp.where(
+                    num_dones > 0,
+                    returns_ema + effective_alpha * (mean_episode_return - returns_ema),
+                    returns_ema,
+                )
+
+                mean_episode_length = jnp.sum(is_done * episode_lengths) / jnp.maximum(
+                    num_dones, 1
+                )
+                updated_episode_lengths_ema = jnp.where(
+                    num_dones > 0,
+                    lengths_ema + effective_alpha * (mean_episode_length - lengths_ema),
+                    lengths_ema,
+                )
+
+                metrics["moving_avg_return"] = updated_returns_ema
+                metrics["moving_avg_length"] = updated_episode_lengths_ema
+
+                return updated_returns_ema, updated_episode_lengths_ema
+
+            updated_ema = compute_ema(infos, ema_metrics)
+
             if config.get("TEST_DURING_TRAINING", False):
                 rng, _rng = jax.random.split(rng)
                 test_metrics = jax.lax.cond(
@@ -357,7 +393,7 @@ def make_train(config):
 
                 jax.debug.callback(callback, metrics, original_rng)
 
-            runner_state = (train_state, tuple(expl_state), test_metrics, rng)
+            runner_state = (train_state, tuple(expl_state), test_metrics, rng, updated_ema)
 
             return runner_state, metrics
 
@@ -411,9 +447,14 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         expl_state = vmap_reset(config["NUM_ENVS"])(_rng)
 
+        initial_return_ema = 0.0
+        initial_episode_length_ema = 0.0
+
+        initial_ema_metrics = (initial_return_ema, initial_episode_length_ema)
+
         # train
         rng, _rng = jax.random.split(rng)
-        runner_state = (train_state, expl_state, test_metrics, _rng)
+        runner_state = (train_state, expl_state, test_metrics, _rng, initial_ema_metrics)
 
         runner_state, metrics = jax.lax.scan(
             _update_step, runner_state, None, config["NUM_UPDATES"]
@@ -452,6 +493,8 @@ def single_run(config):
     outs = jax.block_until_ready(train_vjit(rngs))
     print(f"Took {time.time()-t0} seconds to complete.")
 
+    np.savez(config["METRICS_SAVE_NAME"], **outs["metrics"])
+
     if config.get("SAVE_PATH", None) is not None:
         from purejaxql.utils.save_load import save_params
         model_state = outs["runner_state"][0]
@@ -471,7 +514,6 @@ def single_run(config):
                 f'{alg_name}_{env_name}_seed{config["SEED"]}_vmap{i}.safetensors',
             )
             save_params(params, save_path)
-
 
 def tune(default_config):
     """Hyperparameter sweep with wandb."""

@@ -18,13 +18,15 @@ LR_LINEAR_DECAY: True
 REW_SCALE: 0.1
 GAMMA: 0.99
 LAMBDA: 0.95
+NUM_EPISODES_FOR_EMA_AVERAGE: 30
+METRICS_SAVE_NAME: "pqn_cartpole_metrics.npz"
 
 # env specific
 ENV_NAME: "CartPole-v1" # Acrobot-v1
 ENV_KWARGS: {}
 
 # evaluation
-TEST_DURING_TRAINING: True 
+TEST_DURING_TRAINING: False
 TEST_INTERVAL: 0.05 # in terms of total updates
 TEST_NUM_ENVS: 128
 EPS_TEST: 0. # 0 for greedy policy
